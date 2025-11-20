@@ -83,8 +83,18 @@ class _ChatsDrawerState extends ConsumerState<ChatsDrawer> {
   Widget _conversationsSliver(
     List<dynamic> items, {
     bool inFolder = false,
+    String? folderId,
     Map<String, Model> modelsById = const <String, Model>{},
   }) {
+    // Use reorderable version if inside a folder
+    if (inFolder && folderId != null) {
+      return _conversationsSliverWithReorder(
+        items,
+        folderId: folderId,
+        modelsById: modelsById,
+      );
+    }
+
     return SliverList(
       delegate: SliverChildBuilderDelegate(
         (context, index) => _buildTileFor(
@@ -94,6 +104,120 @@ class _ChatsDrawerState extends ConsumerState<ChatsDrawer> {
         ),
         childCount: items.length,
       ),
+    );
+  }
+
+  Widget _conversationsSliverWithReorder(
+    List<dynamic> items, {
+    required String folderId,
+    Map<String, Model> modelsById = const <String, Model>{},
+  }) {
+    // Build list with drop zones between and around conversations for reordering
+    // Structure: [DropZone0] [Conv0] [DropZone1] [Conv1] [DropZone2] ...
+    return SliverList(
+      delegate: SliverChildBuilderDelegate(
+        (context, index) {
+          // Even indices are drop zones, odd indices are conversations
+          final isDropZone = index.isEven;
+          if (isDropZone) {
+            // Drop zone at index k corresponds to insert position k/2
+            final targetIndex = index ~/ 2;
+            return _buildReorderDropZone(folderId, targetIndex);
+          }
+
+          // Odd indices are conversations
+          final itemIndex = index ~/ 2;
+          final conversationTile = _buildTileFor(
+            items[itemIndex],
+            inFolder: true,
+            modelsById: modelsById,
+          );
+
+          return conversationTile;
+        },
+        // 2n+1 elements: n conversations + (n+1) drop zones
+        childCount: items.isEmpty ? 0 : items.length * 2 + 1,
+      ),
+    );
+  }
+
+  Widget _buildReorderDropZone(String folderId, int targetIndex) {
+    return DragTarget<_DragConversationData>(
+      onWillAcceptWithDetails: (details) {
+        // Only accept if dragging from the same folder
+        return details.data.folderId == folderId;
+      },
+      onAcceptWithDetails: (details) async {
+        try {
+          final api = ref.read(apiServiceProvider);
+          if (api == null) throw Exception('No API service');
+
+          // Get current folder and its conversations
+          final foldersNotifier = ref.read(foldersProvider.notifier);
+          final folders = await ref.read(foldersProvider.future);
+          final folder = folders.firstWhere((f) => f.id == folderId);
+
+          // Create new order by removing and inserting at target position
+          final newOrder = List<String>.from(folder.conversationIds);
+          final draggedId = details.data.id;
+          final currentIndex = newOrder.indexOf(draggedId);
+
+          if (currentIndex != -1 && currentIndex != targetIndex) {
+            newOrder.removeAt(currentIndex);
+            // Adjust target index if we removed an item before it
+            final adjustedIndex =
+                currentIndex < targetIndex ? targetIndex - 1 : targetIndex;
+            newOrder.insert(adjustedIndex, draggedId);
+
+            // Update via API
+            await api.reorderConversationsInFolder(folderId, newOrder);
+            HapticFeedback.selectionClick();
+
+            // Update local state
+            foldersNotifier.updateFolder(
+              folderId,
+              (f) => f.copyWith(conversationIds: newOrder),
+            );
+
+            refreshConversationsCache(ref, includeFolders: true);
+          }
+        } catch (e, stackTrace) {
+          DebugLogger.error(
+            'reorder-conversation-failed',
+            scope: 'drawer',
+            error: e,
+            stackTrace: stackTrace,
+          );
+          if (mounted) {
+            await _showDrawerError(
+              AppLocalizations.of(context)!.failedToMoveChat,
+            );
+          }
+        }
+      },
+      builder: (context, candidateData, rejectedData) {
+        final isHovering = candidateData.isNotEmpty &&
+            candidateData.first?.folderId == folderId;
+        return AnimatedContainer(
+          duration: const Duration(milliseconds: 200),
+          height: isHovering ? 40 : 4,
+          margin: EdgeInsets.symmetric(
+            horizontal: Spacing.md + (isHovering ? 0 : Spacing.md),
+          ),
+          decoration: isHovering
+              ? BoxDecoration(
+                  color: context.conduitTheme.buttonPrimary
+                      .withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(AppBorderRadius.small),
+                  border: Border.all(
+                    color: context.conduitTheme.buttonPrimary
+                        .withValues(alpha: 0.40),
+                    width: BorderWidth.medium,
+                  ),
+                )
+              : null,
+        );
+      },
     );
   }
 
@@ -394,6 +518,7 @@ class _ChatsDrawerState extends ConsumerState<ChatsDrawer> {
                           _conversationsSliver(
                             convs,
                             inFolder: true,
+                            folderId: folder.id,
                             modelsById: modelsById,
                           ),
                         );
@@ -615,6 +740,7 @@ class _ChatsDrawerState extends ConsumerState<ChatsDrawer> {
                       _conversationsSliver(
                         convs,
                         inFolder: true,
+                        folderId: folder.id,
                         modelsById: modelsById,
                       ),
                     );
@@ -1298,7 +1424,11 @@ class _ChatsDrawerState extends ConsumerState<ChatsDrawer> {
           left: inFolder ? Spacing.md : 0,
         ),
         child: LongPressDraggable<_DragConversationData>(
-          data: _DragConversationData(id: conv.id, title: title),
+          data: _DragConversationData(
+            id: conv.id,
+            title: title,
+            folderId: conv.folderId,
+          ),
           dragAnchorStrategy: pointerDragAnchorStrategy,
           feedback: _ConversationDragFeedback(
             title: title,
@@ -1586,7 +1716,12 @@ class _ExpandedFoldersNotifier extends Notifier<Map<String, bool>> {
 class _DragConversationData {
   final String id;
   final String title;
-  const _DragConversationData({required this.id, required this.title});
+  final String? folderId;
+  const _DragConversationData({
+    required this.id,
+    required this.title,
+    this.folderId,
+  });
 }
 
 class _ConversationDragFeedback extends StatelessWidget {

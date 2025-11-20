@@ -1035,6 +1035,21 @@ class ApiService {
     );
   }
 
+  Future<void> reorderConversationsInFolder(
+    String folderId,
+    List<String> orderedConversationIds,
+  ) async {
+    _traceApi('Reordering conversations in folder: $folderId');
+    await _dio.post(
+      '/api/v1/folders/$folderId/update',
+      data: {
+        'items': {
+          'chats': orderedConversationIds,
+        },
+      },
+    );
+  }
+
   Future<List<Conversation>> getConversationsInFolder(String folderId) async {
     _traceApi('Fetching conversations in folder: $folderId');
     final response = await _dio.get('/api/v1/chats/folder/$folderId');
